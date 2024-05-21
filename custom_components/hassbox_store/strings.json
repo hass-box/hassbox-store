@@ -1,0 +1,57 @@
+{
+  "config": {
+    "flow_title": "HassBox集成商店",
+    "step": {
+      "user": {
+        "title": "HassBox集成商店",
+        "description": "可从 **HassBox** 微信公众号获取Token密钥",
+        "data": {
+          "token": "Token密钥"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "该集成已经配置过了，且只能配置一次。若要重新配置，请先删除旧集成。"
+    }
+  },
+  "options": {
+    "flow_title": "HassBox集成商店",
+    "step": {
+      "user": {
+        "title": "HassBox集成商店",
+        "description": "{message}"
+      },
+      "install_integration": {
+        "title": "安装",
+        "data": {
+          "integrations": "请选择要安装的集成、卡片或主题样式"
+        },
+        "data_description": {
+          "integrations": "可多选，支持边输入边搜索！"
+        }
+      },
+      "delete_integration": {
+        "title": "删除",
+        "data": {
+          "integrations": "请选择要删除的集成、卡片或主题样式"
+        }
+      },
+      "update_integration": {
+        "title": "更新",
+        "data": {
+          "integrations": "请选择要更新的集成、卡片或主题样式"
+        }
+      }
+    },
+    "error": {
+      "version_incompatible": "{version_incompatible}"
+    },
+    "abort": {
+      "disabled": "### HassBox集成商店 \n\n {message}",
+      "install_success": "### {type}成功！\n\n {message} \n\n 需重新启动 Home Assistant 才会生效！",
+      "install_failure": "### {type}失败！\n\n {message} \n\n 如需帮助, 请至 **HassBox** 微信公众号咨询。",
+      "view_installed": "{message}",
+      "reboot": "### 已删除！ \n\n {message} \n\n 还需重新启动 Home Assistant 才会生效！"
+    }
+  }
+}

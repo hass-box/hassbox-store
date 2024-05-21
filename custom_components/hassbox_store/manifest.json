@@ -1,0 +1,13 @@
+{
+    "domain": "hassbox_store",
+    "name": "HassBox集成商店",
+    "codeowners": ["@HassBox"],
+    "config_flow": true,
+    "dependencies": [],
+    "documentation": "https://hassbox.cn",
+    "integration_type": "hub",
+    "iot_class": "cloud_polling",
+    "requirements": [],
+    "version": "0.0.9"
+  }
+  
