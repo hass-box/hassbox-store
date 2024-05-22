@@ -6,7 +6,8 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import selector
 
-from .const import DOMAIN, HASSBOX_VERSION
+from .const import DOMAIN, STORE_VERSION, STORE_ID
+from .data_client import HassBoxDataClient
 from .base import HassBoxStore
 from .utils.store import async_load_from_store, async_save_to_store
 from .utils.logger import LOGGER
@@ -23,46 +24,37 @@ class HassBoxStoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="single_instance_allowed")
         if self.hass.data.get(DOMAIN):
             return self.async_abort(reason="single_instance_allowed")
+
+        config = await async_load_from_store(self.hass, "hassbox_store.config") or None
+        self.data_client = HassBoxDataClient(hass=self.hass, config=config)
+        result = await self.data_client.get_qrcode()
         
-        if user_input is None:
-            user_input = {}
-        else:
-            token = user_input['token']
-            uuid = self.hass.data["core.uuid"]
-            try:
-                response = await async_get_clientsession(self.hass).post(
-                    f"https://hassbox.cn/api/public/integration/bindToken",
-                    json={"uuid": uuid, "token": token}
-                )
-            except Exception as exception:
-                raise Exception(f"Error fetching data from HassBox Store: {exception}") from exception
-            
-            result = await response.json()
-            if response.status == 200:
-                config = await async_load_from_store(self.hass, "hassbox_store.config") or {} 
-                config["token"] = token
-                config["certificate"] = result["certificate"]
-                await async_save_to_store(self.hass, "hassbox_store.config", config)
-                return self.async_create_entry(
-                    title="HassBox集成商店",
-                    data={}
-                )
-            else :
-                errors["token"] = result['errmsg']
-        
-        data_schema = {
-            vol.Required("token") : selector({
-                "text": {
-                    "type": "password"
-                }
-            })
-        }
-        
+        if "errcode" in result and result["errcode"] == 200:
+            return self.async_create_entry(title="HassBox集成商店", data={})
+
+        if "ticket" not in result:
+            return self.async_abort(
+                reason="qrcode_error",
+                description_placeholders={"errmsg": result["errmsg"]},
+            )
+
         return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(data_schema),
-            errors=errors
+            step_id="bind_wechat",
+            description_placeholders={
+                "qr_image": '<img src="https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=' + result["ticket"] + '" width="250"/>'
+            },
         )
+
+    async def async_step_bind_wechat(self, user_input=None):
+        result = await self.data_client.check_state()
+
+        if result["errcode"] != 0:
+            return self.async_abort(
+                reason="qrcode_error",
+                description_placeholders={"errmsg": result["errmsg"]},
+            )
+
+        return self.async_create_entry(title="HassBox集成商店", data={})
 
     @staticmethod
     @callback
@@ -88,23 +80,29 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             "install_integration": "安装 新的集成、卡片和主题样式",
         }
 
-        installedRepo = await async_load_from_store(self.hass, "hassbox.installed")
-        if len(installedRepo) > 0:
+        self.installedRepoMap = await async_load_from_store(self.hass, "hassbox_store.installed")
+        self.installedRepoList = []
+        for id in self.installedRepoMap:
+            self.installedRepoList.append(self.installedRepoMap[id])
+            
+        if len(self.installedRepoList) > 0:
             options["delete_integration"] = "删除 已安装的集成、卡片和主题样式"
             options["view_integration"] = "查看 已安装的集成、卡片和主题样式"
 
         
-        repoList = await async_load_from_store(self.hass, "hassbox.repo") or []
-        has_update = 0
-        for id in installedRepo.keys():
-            for repo in repoList:
-                if repo["id"] == id:
-                    if self.hassbox.has_update(installedRepo[id], repo):
-                        has_update += 1
-                    break
+        self.repoList = await async_load_from_store(self.hass, "hassbox_store.repo") or []
+        self.repoMap = {}
+        for repo in self.repoList:
+            self.repoMap[repo["id"]] = repo
 
-        hassbox_version = self.hassbox.get_repo_version(self.hassbox.config["integration"])
-        if HASSBOX_VERSION != hassbox_version["name"]:
+        has_update = 0
+        for installedRepo in self.installedRepoList:
+            if self.hassbox.has_update(installedRepo, self.repoMap[installedRepo["id"]]):
+                has_update += 1
+                break
+        
+        self.hassboxStoreRepo = { "id": STORE_ID, "version_name": STORE_VERSION }
+        if self.hassbox.has_update(self.hassboxStoreRepo, self.repoMap[self.hassboxStoreRepo["id"]]):
             has_update += 1
 
         if has_update > 0:
@@ -121,8 +119,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_install_integration(self, user_input=None):
         errors = {}
         version_incompatible = ""
-        
-        repoList = await async_load_from_store(self.hass, "hassbox.repo") or []
 
         if user_input is None:
             user_input = {}
@@ -130,22 +126,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             selectedRepos = []
             integrations_errors = []
             for id in user_input['integrations']:
-                for repo in repoList:
-                    if repo["id"] == id:
-                        selectedRepos.append(repo)
-                        break
+                selectedRepos.append(self.repoMap[id])
             if len(integrations_errors) == 0:
                 return await self.async_step_install(selectedRepos, "安装")
             else:
                 version_incompatible = "\n\n".join(integrations_errors)
                 errors["integrations"] = "version_incompatible"
         
-        installedRepo = await async_load_from_store(self.hass, "hassbox.installed")
-        installedKeys = installedRepo.keys()
-        repoList = [d for d in repoList if d['id'] not in installedKeys]
-        repoList = sorted(repoList, key=lambda repo: (repo['star_count'], repo['forks_count']), reverse=True)
+        installedKeys = list(self.installedRepoMap.keys())
+        installedKeys.append(STORE_ID)
+        uninstalledRepoList = [d for d in self.repoList if d['id'] not in installedKeys]
+        uninstalledRepoList = sorted(uninstalledRepoList, key=lambda repo: (repo['star_count'], repo['forks_count']), reverse=True)
         options = []
-        for repo in repoList:
+        for repo in uninstalledRepoList:
             options.append({"label": repo["name"], "value": repo["id"]})
             
         data_schema = {
@@ -168,19 +161,17 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_delete_integration(self, user_input=None):
         errors = {}
 
-        installedRepo = await async_load_from_store(self.hass, "hassbox.installed")
         if user_input is None:
             user_input = {}
         else:
             selectedRepos = []
             for id in user_input['integrations']:
-                selectedRepos.append(installedRepo[id])
+                selectedRepos.append(self.installedRepoMap[id])
             return await self.async_step_delete(selectedRepos)
         
         options = []
-        for key in installedRepo:
-            repo = installedRepo[key]
-            options.append({"label": repo["name"], "value": key})
+        for installedRepo in self.installedRepoList:
+            options.append({"label": installedRepo["name"], "value": installedRepo["id"]})
 
         data_schema = {
             vol.Required("integrations") : selector({
@@ -199,12 +190,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         )
     
     async def async_step_view_integration(self, user_input=None):
-        installedRepo = await async_load_from_store(self.hass, "hassbox.installed")
         integrationRepo = []
         cardRepo = []
         themeRepo = []
-        for key in installedRepo:
-            repo = installedRepo[key]
+        for repo in self.installedRepoList:
             if repo["type"] == "integration":
                 integrationRepo.append(repo)
             elif repo["type"] == "card":
@@ -234,22 +223,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         errors = {}
         version_incompatible = ""
 
-        repoList = await async_load_from_store(self.hass, "hassbox.repo") or []
-
         if user_input is None:
             user_input = {}
         else:
             selectedRepos = []
             integrations_errors = []
 
-            if "hass-box/hassbox-integration" in user_input['integrations']:
-                selectedRepos.append(self.hassbox.config["integration"])
-
             for id in user_input['integrations']:
-                for repo in repoList:
-                    if repo["id"] == id:
-                        selectedRepos.append(repo)
-                        break
+                selectedRepos.append(self.repoMap[id])
             if len(integrations_errors) == 0:
                 return await self.async_step_install(selectedRepos, "更新")
             else:
@@ -258,17 +239,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         
         updateRepo = []
 
-        hassbox_version = self.hassbox.get_repo_version(self.hassbox.config["integration"])
-        if HASSBOX_VERSION != hassbox_version["name"]:
-            updateRepo.append(self.hassbox.config["integration"])
-
-        installedRepo = await async_load_from_store(self.hass, "hassbox.installed")
-        for id in installedRepo.keys():
-            for repo in repoList:
-                if repo["id"] == id:
-                    if self.hassbox.has_update(installedRepo[id], repo):
-                        updateRepo.append(repo)
-                    break
+        for repo in self.installedRepoList:
+            if self.hassbox.has_update(repo, self.repoMap[repo["id"]]):
+                updateRepo.append(repo)
+                break
+        
+        self.hassboxStoreRepo = { "id": STORE_ID, "name": "HassBox集成商店", "version_name": STORE_VERSION }
+        if self.hassbox.has_update(self.hassboxStoreRepo, self.repoMap[self.hassboxStoreRepo["id"]]):
+            updateRepo.append(self.hassboxStoreRepo)
         
         options = []
         for repo in updateRepo:

@@ -2,16 +2,14 @@
   "config": {
     "flow_title": "HassBox集成商店",
     "step": {
-      "user": {
-        "title": "HassBox集成商店",
-        "description": "可从 **HassBox** 微信公众号获取Token密钥",
-        "data": {
-          "token": "Token密钥"
-        }
+      "bind_wechat": {
+        "title": "微信扫码绑定",
+        "description": "\n{qr_image}\n\n"
       }
     },
     "abort": {
-      "single_instance_allowed": "该集成已经配置过了，且只能配置一次。若要重新配置，请先删除旧集成。"
+      "single_instance_allowed": "该集成已经配置过了，且只能配置一次。若要重新配置，请先删除旧集成。",
+      "qrcode_error": "{errmsg}"
     }
   },
   "options": {
@@ -50,7 +48,7 @@
       "disabled": "### HassBox集成商店 \n\n {message}",
       "install_success": "### {type}成功！\n\n {message} \n\n 需重新启动 Home Assistant 才会生效！",
       "install_failure": "### {type}失败！\n\n {message} \n\n 如需帮助, 请至 **HassBox** 微信公众号咨询。",
-      "view_installed": "{message}",
+      "view_installed": "## 查看 \n\n\n{message}",
       "reboot": "### 已删除！ \n\n {message} \n\n 还需重新启动 Home Assistant 才会生效！"
     }
   }

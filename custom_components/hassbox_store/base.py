@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import gzip
-import os, re
-import pathlib
+import os
 import shutil
 import zipfile
 import tarfile
 import hashlib
-import json
 from typing import Any
 import logging
 import time
@@ -21,24 +19,18 @@ from .utils.logger import LOGGER
 from .utils.store import async_save_to_store, async_load_from_store
 from packaging.version import parse as parse_version
 
+from .data_client import HassBoxDataClient
+from .const import STORE_ID
+
 class HassBoxStore:
     hass: HomeAssistant | None = None
     session: ClientSession | None = None
     config: dict[str, Any] | None = None
+    data_client: HassBoxDataClient | None = None
     enable: bool = False
     disabled_reason: str | None = None
     log: logging.Logger = LOGGER
     first_time: bool = True
-
-    async def async_check_valid(self):
-        response = await self.get("https://hassbox.cn/api/public/integration/checkValid")
-        if response.status == 200:
-            self.enable = True
-        else:
-            self.enable = False
-            result = await response.json()
-            self.disabled_reason = result['errmsg']
-            self.log.error(self.disabled_reason)
 
     async def async_update_data(self):
         last_time_update = 0
@@ -49,31 +41,33 @@ class HassBoxStore:
             return
 
         self.first_time = False
-        
-        response = await self.get("https://hassbox.cn/api/public/integration/data")
-        if response.status != 200:
+
+        result = await self.data_client.get_data()
+        if "errcode" in result and result["errcode"] == 1:
+            self.enable = False
+            self.disabled_reason = result['errmsg']
+            self.log.error(self.disabled_reason)
             return
         
-        result = await response.json()
-        self.config["message"] = result["message"]
-        self.config["integration"] = result["integration"]
+        self.enable = True
         self.config["last_time_update"] = time.time()
+        if "errmsg" in result:
+            self.config["message"] = result["errmsg"]
+            return
 
+        self.config["message"] = result["message"]
         await async_save_to_store(self.hass, "hassbox_store.config", self.config)
 
-        response = await self.get(result["data_source_url"])
+        response = await self.session.get(result["data_source_url"])
         if response.status != 200:
             return
-        
         result = await response.json()
-        await async_save_to_store(self.hass, "hassbox.repo", result)
-
-        result = await async_load_from_store(self.hass, "lovelace_resources") or {}
+        await async_save_to_store(self.hass, "hassbox_store.repo", result)
 
     async def async_install_integration(self, repo: dict[str, Any]):
         repo_version = self.get_repo_version(repo)
         if repo_version is None:
-            self.log.error("%s withou version", repo['id'])
+            self.log.error("%s without version", repo['id'])
             return False
         
         assets_download_url = "https://get.hassbox.cn/integration/" + repo["id"] + "/" + repo_version["name"] + "/" + repo_version["assets_name"]
@@ -170,6 +164,11 @@ class HassBoxStore:
                 if os.path.exists(local_file):
                     os.remove(local_file)
                 shutil.move(temp_assets_file, local_file)
+
+                with open(local_file, "rb") as f_in:
+                    with gzip.open(local_file + ".gz", "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+
                 found_card = True
             else :
                 if repo_version.get("filename"):
@@ -210,23 +209,27 @@ class HassBoxStore:
                 resource_url = "/local/" + repo['id'].split('/')[1] + "/" + card_name
                 lovelace_resources = await async_load_from_store(self.hass, "lovelace_resources") or {}
                 installedBefore = False
-                for item in lovelace_resources["items"]:
-                    if item["url"].startswith(resource_url):
-                        item["url"] = resource_url + "?tag=" + str(int(time.time()))
-                        installedBefore = True
-                        break
+                if lovelace_resources.get("items"):
+                    for item in lovelace_resources["items"]:
+                        if item["url"].startswith(resource_url):
+                            item["url"] = resource_url + "?tag=" + str(int(time.time()))
+                            installedBefore = True
+                            break
+                else:
+                    lovelace_resources["items"] = []
+
                 if not installedBefore:
                     resource_url = resource_url + "?tag=" + str(int(time.time()))
-                    id = self.get_md5(resource_url)
+                    id = await self.get_md5(resource_url)
                     lovelace_resources["items"].append({"url": resource_url, "type": "module", "id": id })
                 await async_save_to_store(self.hass, "lovelace_resources", lovelace_resources)
 
-        if installed and repo["id"] != "hass-box/hassbox-integration":
-            result = await async_load_from_store(self.hass, "hassbox.installed") or {}
+        if installed and repo["id"] != STORE_ID:
+            result = await async_load_from_store(self.hass, "hassbox_store.installed") or {}
             repo['version_name'] = repo_version['name']
             del repo['version_simple']
             result[repo['id']] = repo
-            await async_save_to_store(self.hass, "hassbox.installed", result)
+            await async_save_to_store(self.hass, "hassbox_store.installed", result)
 
         def cleanup_temp_assets_dir():
             if os.path.exists(temp_assets_dir):
@@ -259,25 +262,14 @@ class HassBoxStore:
                 await async_save_to_store(self.hass, "lovelace_resources", lovelace_resources)
 
         if local_dir:
-            shutil.rmtree(local_dir)
+            if os.path.exists(local_dir):
+                shutil.rmtree(local_dir)
 
-        result = await async_load_from_store(self.hass, "hassbox.installed") or {}
+        result = await async_load_from_store(self.hass, "hassbox_store.installed") or {}
         result.pop(repo["id"])
-        await async_save_to_store(self.hass, "hassbox.installed", result)
+        await async_save_to_store(self.hass, "hassbox_store.installed", result)
 
         return True
-    
-    async def get(self, url: str):
-        try:
-            uuid = self.hass.data["core.uuid"]
-            token = self.config["token"]
-            certificate = self.config["certificate"]
-            params = {"uuid": uuid, "token": token, "certificate": certificate}
-            response = await self.session.get(url, params=params)
-        except Exception as exception:
-            raise Exception(f"Error fetching data from HassBox Store: {exception}") from exception
-        
-        return response
     
     async def async_download_file(self, url):
         if url is None:
@@ -345,8 +337,8 @@ class HassBoxStore:
 
     def get_repo_version(self, repo: dict[str, Any]):
         for version in repo['version_simple']:
-            if repo.get("homeassistant"):
-                if parse_version(repo["homeassistant"]) >= parse_version(HAVERSION):
+            if version.get("homeassistant"):
+                if parse_version(HAVERSION) >= parse_version(version["homeassistant"]):
                     return version
             else:
                 return version
