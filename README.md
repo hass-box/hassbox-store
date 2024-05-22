@@ -1,6 +1,6 @@
 # HassBox 集成商店
 
-平替 HACS，无需 Github 账号，小白能轻松安装 Home Assistant 集成、卡片和主题样式。
+平替 HACS，无需 Github 账号，小白轻松安装 Home Assistant 集成、卡片和主题样式。
 
 ## 安装/更新
 
@@ -31,3 +31,7 @@ curl -fsSL get.hassbox.cn/hassbox-store | bash
 2. 重启 Home Assistant
 
 3. 在 Home Assistant 开发者工具中调用此服务[`service: shell_command.update_hassbox_store`](https://my.home-assistant.io/redirect/developer_call_service/?service=shell_command.update_hassbox_store)
+
+## 使用教程
+
+[HassBox 集成商店使用演示 -> ](https://hassbox.cn/service/integration/install-hassbox-store.html#%E4%BD%BF%E7%94%A8%E6%BC%94%E7%A4%BA)
