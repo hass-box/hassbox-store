@@ -60,7 +60,7 @@ cd "$haPath/custom_components"
 info "检查依赖项 ok"
 
 info "下载 HassBox集成商店 安装包"
-wget -o hassbox_store.zip "https://get.hassbox.cn/hassbox_store.zip?t=$(date +%s)" >/dev/null 2>&1
+wget -O hassbox_store.zip "https://get.hassbox.cn/hassbox_store.zip?t=$(date +%s)" >/dev/null 2>&1
 info "下载 HassBox集成商店 安装包 ok"
 
 info "HassBox集成商店 安装包解压"
