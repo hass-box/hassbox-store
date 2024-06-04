@@ -99,7 +99,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         for installedRepo in self.installedRepoList:
             if self.hassbox.has_update(installedRepo, self.repoMap[installedRepo["id"]]):
                 has_update += 1
-                break
         
         self.hassboxStoreRepo = { "id": STORE_ID, "version_name": STORE_VERSION }
         if self.hassbox.has_update(self.hassboxStoreRepo, self.repoMap[self.hassboxStoreRepo["id"]]):
@@ -242,7 +241,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         for repo in self.installedRepoList:
             if self.hassbox.has_update(repo, self.repoMap[repo["id"]]):
                 updateRepo.append(repo)
-                break
         
         self.hassboxStoreRepo = { "id": STORE_ID, "name": "HassBox集成商店", "version_name": STORE_VERSION }
         if self.hassbox.has_update(self.hassboxStoreRepo, self.repoMap[self.hassboxStoreRepo["id"]]):
