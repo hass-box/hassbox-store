@@ -1,0 +1,605 @@
+"""Base HassBoxStore class."""
+
+from __future__ import annotations
+
+import gzip
+import os
+import pathlib
+import time
+import asyncio
+import tempfile
+import zipfile
+import tarfile
+import shutil
+import hashlib
+import json
+
+import copy
+
+from typing import Any, cast
+
+from aiohttp.client import ClientSession, ClientTimeout
+from awesomeversion import AwesomeVersion
+
+from homeassistant.components.frontend import async_remove_panel
+from homeassistant.loader import Manifest, async_get_integration
+
+from homeassistant.core import HomeAssistant
+from homeassistant.loader import Integration
+
+from .const import DOMAIN
+from .data_client import HassBoxDataClient
+
+from .frontend import async_register_panel
+from .utils.json import json_loads
+from .utils.logger import LOGGER
+from .utils.store import async_load_from_store, async_save_to_store
+
+
+def json_dumps(data):
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
+
+class HassBoxStore:
+    hass: HomeAssistant | None = None
+    session: ClientSession | None = None
+    config: dict[str, Any] | None = None
+    data_client: HassBoxDataClient | None = None
+    disabled_reason: str | None = None
+    first_time: bool = True
+    appList: list[Any] | None = None
+    dashboard: list[Any] | None = None
+    lastTimeUpdate: float = 0
+    version: AwesomeVersion | None = None
+    integration: Integration | None = None
+    upgrade: bool = False
+
+    sidepanel_icon: str = "mdi:storefront"
+    sidepanel_title: str = "HassBox 应用商店"
+
+    def __init__(self) -> None:
+        """Initialize."""
+        self.log = LOGGER
+        self.appMap = {}
+
+    async def async_update_data(self, force=False):
+        self.lastTimeUpdate = int(time.time())
+
+        cachedData = await async_load_from_store(self.hass, f"{DOMAIN}.data") or {}
+
+        appMap = {}
+        if "appList" in cachedData:
+            for app in cachedData["appList"]:
+                appMap[app['appId']] = app
+
+        if "dashboard" in cachedData:
+            self.dashboard = cachedData["dashboard"]
+
+        try:
+            version = -1
+            if force is False and "lastTimeUpdate" in cachedData:
+                version = cachedData["lastTimeUpdate"]
+
+            result = await self.data_client.get_data(version)
+
+            if "appList" in result:
+                for app in result["appList"]:
+                    appMap[app['appId']] = app
+
+            if "dashboard" in result:
+                self.dashboard = result["dashboard"]
+
+        except (
+            BaseException
+        ) as error:
+            self.log.error("数据刷新失败：%s", error)
+
+        self.appList = list(appMap.values())
+        self.appMap = {}
+
+        await async_save_to_store(self.hass, f"{DOMAIN}.data", {"appList": self.appList, "dashboard": [self.dashboard], "lastTimeUpdate": self.lastTimeUpdate})
+
+    async def async_get_dashboard(self):
+        if int(time.time()) > (self.lastTimeUpdate + 3600 * 24):
+            await self.async_update_data()
+        return self.dashboard
+
+    async def async_get_app_list(self):
+        return self.appList
+
+    async def async_upgrade_store(self, appId, version, reload):
+        if self.upgrade:
+            return {"errcode": 0}
+
+        result = await self.data_client.get_app_assets(appId, version)
+        if "errcode" in result and result['errcode'] != 0:
+            return result
+
+        appInfo = await self.async_get_app_info(appId)
+        if appInfo is None:
+            return {"errcode": 302, "errmsg": "not_found"}
+
+        result = await self.async_install_integration(appInfo, version, result, False)
+        if result is True:
+            self.upgrade = True
+            if reload:
+                async_remove_panel(self.hass, "hassbox-store")
+                hassboxStore = self.hass.data.get(DOMAIN)
+                await async_register_panel(self.hass, hassboxStore, version)
+
+            return {"errcode": 0}
+        else:
+            return {"errcode": 1, "errmsg": result}
+
+    async def async_load_integration_manifest(self, appInfo):
+        manifest_path = pathlib.Path(
+            appInfo["component_directory"]) / "manifest.json"
+        return cast(Manifest, json_loads(manifest_path.read_text()))
+
+    async def async_get_app_info(self, appId):
+        appInfo = None
+        if appId in self.appMap:
+            appInfo = self.appMap[appId]
+            if int(time.time()) > (appInfo['lastTimeUpdate'] + 3600):
+                appInfo = None
+
+        if appInfo is None:
+            appInfo = await self.data_client.get_app_info(appId)
+            if appInfo is None:
+                return None
+            appInfo['lastTimeUpdate'] = int(time.time())
+            self.appMap[appId] = appInfo
+
+        if "buildIn" in appInfo and appInfo["buildIn"] == 1:
+            try:
+                integration = await async_get_integration(self.hass, appInfo["domain"])
+                appInfo["installed"] = True
+            except (BaseException) as error:
+                self.log.error("Integration %s is not loaded. %s", appInfo["domain"], error)
+                appInfo["installed"] = False
+        else:
+            appInstalled = await async_load_from_store(self.hass, f"{DOMAIN}.installed") or {}
+            if appId in appInstalled:
+                if appInfo["appType"] == "addon":
+                    hassio = self.hass.data["hassio"]
+                    try:
+                        slug = "local_" + appInfo["domain"]
+                        result = await hassio.send_command(f"/store/addons/{slug}", method="get")
+                        appInfo["installed"] = result['data']['installed']
+                        appInfo["installed_version"] = result['data']["version"]
+                    except (BaseException) as error:
+                        self.log.error("Addon %s is not install. %s", appInfo["domain"], error)
+                        appInfo["installed"] = False
+
+                elif appInfo["appType"] == "integration":
+                    manifest_path = pathlib.Path(appInstalled[appId]["component_directory"]) / "manifest.json"
+                    if manifest_path.exists():
+                        with open(manifest_path, encoding="utf-8") as manifestFile:
+                            manifest = json.load(manifestFile)
+
+                        appInfo["installed"] = True
+                        appInfo["installed_version"] = appInstalled[appId]["installed_version"]
+                    else:
+                        appInfo["installed"] = False
+
+                else:
+                    appInfo["installed"] = True
+                    appInfo["installed_version"] = appInstalled[appId]["installed_version"]
+                    if appInfo["appType"] == "card":
+                        appInfo["card_name"] = appInstalled[appId]["card_name"]
+
+            else:
+                appInfo["installed"] = False
+
+        if appInfo["installed"] == True:
+            if appInfo["appType"] == "integration":
+                try:
+                    integration = await async_get_integration(self.hass, appInfo["domain"])
+                    appInfo["config_flow"] = integration.config_flow
+                    appInfo["loaded"] = True
+                except (BaseException) as error:
+                    self.log.error("Integration %s is not loaded. %s", appInfo["domain"], error)
+                    appInfo["loaded"] = False
+
+                entries = self.hass.config_entries.async_entries(appInfo["domain"])
+                if len(entries) > 0:
+                    appInfo["integrated"] = True
+                else:
+                    appInfo["integrated"] = False
+
+            elif appInfo["appType"] == "card" or appInfo["appType"] == "theme":
+                if "need_restart" in appInfo:
+                    appInfo["loaded"] = False
+                else:
+                    appInfo["loaded"] = True
+            else:
+                appInfo["loaded"] = False
+
+        return appInfo
+
+    async def async_download_app(self, appId, version, domain):
+        appInfo = self.appMap[appId]
+        if appInfo is None:
+            return {"errcode": 1, "errmsg": "not_found"}
+
+        result = await self.data_client.get_app_assets(appId, version)
+        if "errcode" in result and result['errcode'] != 0:
+            return result
+
+        appAssets = result
+
+        if appInfo['appType'] == "integration" or appInfo['appType'] == "card" or appInfo['appType'] == "theme":
+            result = await self.async_install_integration(appInfo, version, appAssets)
+            if result is True:
+                if appInfo["appType"] == "card" or appInfo["appType"] == "theme":
+                    appInfo["need_restart"] = True
+                return await self.async_get_app_info(appId)
+            else:
+                return {"errcode": 1, "errmsg": result}
+        elif appInfo['appType'] == "addon":
+            appInfo['slug'] = domain
+            result = await self.async_install_addon(appInfo, version, appAssets)
+            if result is True:
+                return await self.async_get_app_info(appId)
+            else:
+                return {"errcode": 1, "errmsg": result}
+        else:
+            return {"errcode": 1, "errmsg": "unkown"}
+
+    async def async_install_integration(self, appInfo: dict[str, Any], version, appAssets, saveToStore=True):
+        appInfo = copy.deepcopy(appInfo)
+        app_version = self.get_repo_version(appInfo, version)
+        if app_version is None:
+            return "without version"
+
+        assetsName = appAssets['assetsName']
+        assets_download_url = appAssets['assetsDownloadUrl']
+        filecontent = await self.async_download_file(assets_download_url)
+        if filecontent is None:
+            return "not downloaded"
+
+        temp_assets_dir = await self.hass.async_add_executor_job(tempfile.mkdtemp)
+        temp_assets_file = f"{temp_assets_dir}/{assetsName}"
+        result = await self.async_save_file(temp_assets_file, filecontent)
+        if not result:
+            return "unable save download file"
+
+        assets_filename = assetsName.split('.')[0]
+        temp_assets_extract_dir = f"{temp_assets_dir}/{assets_filename}"
+        if assetsName.endswith('.zip'):
+            with zipfile.ZipFile(temp_assets_file, "r") as zip_file:
+                zip_file.extractall(temp_assets_extract_dir)
+        elif assetsName.endswith('.tar.gz'):
+            tar = tarfile.open(temp_assets_file)
+            tar.extractall(path=temp_assets_extract_dir)
+
+        hassConfigPath = self.hass.config.path()
+        installed = False
+
+        if appInfo["appType"] == "integration":
+            component_directory = f"{hassConfigPath}/custom_components"
+            component_name = None
+            found_component = False
+
+            for root, dirs, files in os.walk(temp_assets_extract_dir):
+                for f in files:
+                    if f == "manifest.json":
+                        component_name = os.path.basename(root)
+                        local_dir = f"{component_directory}/{component_name}"
+                        if os.path.exists(local_dir):
+                            shutil.rmtree(local_dir)
+                        shutil.move(root, local_dir)
+                        found_component = True
+                        break
+
+                if found_component:
+                    break
+
+                for d in dirs:
+                    if d == "custom_components":
+                        files = os.listdir(os.path.join(root, d))
+                        for file in files:
+                            if os.path.isdir(os.path.join(root, d, file)) and os.path.exists(os.path.join(root, d, file, "manifest.json")):
+                                component_name = file
+                                local_dir = f"{component_directory}/{component_name}"
+                                if os.path.exists(local_dir):
+                                    shutil.rmtree(local_dir)
+                                shutil.move(os.path.join(
+                                    root, d, file), component_directory)
+                                found_component = True
+
+            if found_component:
+                appInfo["component_directory"] = f"{component_directory}/{component_name}"
+                appInfo["component_name"] = component_name
+                manifest_path = pathlib.Path(
+                    appInfo["component_directory"]) / "manifest.json"
+                manifest = cast(Manifest, json_loads(
+                    manifest_path.read_text()))
+                appInfo["domain"] = manifest["domain"]
+                installed = True
+
+        elif appInfo["appType"] == "theme":
+            theme_directory = f"{hassConfigPath}/themes/{appInfo['repoId'].split('/')[1]}"
+            found_theme = False
+
+            for root, dirs, files in os.walk(temp_assets_extract_dir):
+                for d in dirs:
+                    if d == "themes":
+                        files = os.listdir(os.path.join(root, d))
+                        for file in files:
+                            if file.endswith(".yaml"):
+                                await self.async_replace_file(os.path.join(root, d, file), "hacsfiles", "local")
+                            if not os.path.exists(theme_directory):
+                                os.makedirs(theme_directory)
+                            shutil.move(os.path.join(root, d, file),
+                                        os.path.join(theme_directory, file))
+                        found_theme = True
+
+            if found_theme:
+                appInfo["theme_directory"] = theme_directory
+                installed = True
+
+        elif appInfo["appType"] == "card":
+            card_directory = f"{hassConfigPath}/www/{appInfo['appId']}"
+            card_name = None
+            found_card = False
+
+            if assetsName.endswith('.js'):
+                card_name = assetsName
+                if not os.path.exists(card_directory):
+                    os.makedirs(card_directory)
+                local_file = f"{card_directory}/{card_name}"
+                if os.path.exists(local_file):
+                    os.remove(local_file)
+                shutil.move(temp_assets_file, local_file)
+
+                with open(local_file, "rb") as f_in:
+                    with gzip.open(local_file + ".gz", "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+
+                found_card = True
+            else:
+                if app_version.get("filename"):
+                    valid_filenames = (app_version["filename"],)
+                else:
+                    name = appInfo['repoId'].split("/")[1]
+                    valid_filenames = (
+                        f"{name.replace('lovelace-', '')}.js",
+                        f"{name}.js",
+                        f"{name}.umd.js",
+                        f"{name}-bundle.js",
+                    )
+
+                for root, dirs, files in os.walk(temp_assets_extract_dir):
+                    for file in files:
+                        if file.endswith('.js'):
+                            for filename in valid_filenames:
+                                if file == filename:
+                                    card_name = file
+                                    if not os.path.exists(card_directory):
+                                        os.makedirs(card_directory)
+                                    local_file = f"{card_directory}/{card_name}"
+                                    if os.path.exists(local_file):
+                                        os.remove(local_file)
+                                    shutil.move(os.path.join(
+                                        root, file), local_file)
+
+                                    with open(local_file, "rb") as f_in:
+                                        with gzip.open(local_file + ".gz", "wb") as f_out:
+                                            shutil.copyfileobj(f_in, f_out)
+
+                                    found_card = True
+                                    break
+
+            if found_card:
+                appInfo["card_directory"] = card_directory
+                appInfo["card_name"] = card_name
+                installed = True
+
+        if installed and saveToStore:
+            result = await async_load_from_store(self.hass, f"{DOMAIN}.installed") or {}
+            appInfo['installed_version'] = app_version['versionName']
+            del appInfo['version']
+            result[appInfo['appId']] = appInfo
+
+            await async_save_to_store(self.hass, f"{DOMAIN}.installed", result)
+
+        def cleanup_temp_assets_dir():
+            if os.path.exists(temp_assets_dir):
+                shutil.rmtree(temp_assets_dir)
+
+        await self.hass.async_add_executor_job(cleanup_temp_assets_dir)
+
+        return installed
+
+    async def async_install_addon(self, appInfo: dict[str, Any], version, appAssets):
+        appInfo = copy.deepcopy(appInfo)
+        data = {}
+        data["app_id"] = appInfo["appId"]
+        data["token"] = ""
+        data["addon_url"] = appAssets['assetsDownloadUrl']
+        result = await self.async_handle_addon("install", data, 3)
+        if result is not None and result.startswith("{"):
+            result = json.loads(result)
+            if result["status"] == 2:
+                result = await async_load_from_store(self.hass, f"{DOMAIN}.installed") or {}
+                appInfo['installed_version'] = version
+                del appInfo['version']
+                result[appInfo['appId']] = appInfo
+                await async_save_to_store(self.hass, f"{DOMAIN}.installed", result)
+                return True
+            else:
+                return "download error"
+        return result
+
+    async def async_delete_addon(self, appInfo: dict[str, Any]):
+        data = {}
+        data["app_id"] = appInfo["appId"]
+        result = await self.async_handle_addon("uninstall", data, 3)
+        if result.startswith("{"):
+            result = json.loads(result)
+            if result["status"] == 2:
+                return True
+            else:
+                return "delete_error"
+        return result
+
+    async def async_delete_app(self, appId: str):
+        appInstalled = await async_load_from_store(self.hass, f"{DOMAIN}.installed") or {}
+        if appId in appInstalled:
+            appInfo = appInstalled[appId]
+            result = await self.async_delete_local(appInfo)
+            if result is True:
+                return await self.async_get_app_info(appId)
+            else:
+                return result
+        else:
+            return None
+
+    async def async_delete_local(self, appInfo: dict[str, Any]):
+        local_dir = None
+        if appInfo["appType"] == "integration":
+            local_dir = appInfo["component_directory"]
+
+        elif appInfo["appType"] == "theme":
+            local_dir = appInfo["theme_directory"]
+
+        elif appInfo["appType"] == "card":
+            local_dir = appInfo["card_directory"]
+
+        if local_dir:
+            if os.path.exists(local_dir):
+                shutil.rmtree(local_dir)
+
+        if appInfo["appType"] == "addon":
+            result = await self.async_delete_addon(appInfo)
+            if result is not True:
+                return result
+
+        result = await async_load_from_store(self.hass, f"{DOMAIN}.installed") or {}
+        result.pop(appInfo["appId"])
+        await async_save_to_store(self.hass, f"{DOMAIN}.installed", result)
+
+        return True
+
+    async def async_get_installed_app(self):
+        appInstalled = await async_load_from_store(self.hass, f"{DOMAIN}.installed") or {}
+
+        appList = []
+        for app in appInstalled.values():
+            appList.append(app)
+        return appList
+
+    async def async_upgrade_core(self, appId, version, machine=None):
+        result = await self.data_client.get_app_assets(appId, version, machine)
+        if "errcode" in result and result['errcode'] != 0:
+            return result
+
+        appAssets = result
+
+        data = {}
+        data["app_id"] = appId
+        data["token"] = ""
+        data["addon_url"] = appAssets["assetsDownloadUrl"]
+        result = await self.async_handle_addon("install", data, 3)
+        if result is not None and result.startswith("{"):
+            result = json.loads(result)
+            if result["status"] == 2:
+                return {"errcode": 0}
+            else:
+                return {"errcode": 1, "errmsg": "download_error"}
+        return {"errcode": 1, "errmsg": result}
+
+    async def async_download_file(self, url):
+        if url is None:
+            return None
+
+        try:
+            request = await self.session.get(
+                url=url,
+                timeout=ClientTimeout(total=30)
+            )
+
+            if request.status == 200:
+                return await request.read()
+
+            self.log.error("Download failed - %d", request.status)
+        except (
+            BaseException
+        ) as exception:
+            self.log.error("Download failed - %s", exception)
+        return None
+
+    async def async_handle_addon(self, action, data, retryCount=0):
+        result = None
+        try:
+            request = await self.session.post("http://localhost:9222/" + action, json=data)
+            if request.status == 200:
+                result = await request.text()
+            else:
+                self.log.error("Download failed - %d", request.status)
+        except (
+            BaseException
+        ) as exception:
+            self.log.error("Download failed - %s", exception)
+            if retryCount == 0:
+                return str(exception)
+            else:
+                await asyncio.sleep(3)
+                return await self.async_handle_addon(action, data, retryCount - 1)
+
+        if result is not None:
+            return result
+        return "download_error"
+
+    async def async_save_file(self, file_path, content):
+
+        def _write_file():
+            with open(
+                file_path,
+                mode="w" if isinstance(content, str) else "wb",
+                encoding="utf-8" if isinstance(content, str) else None,
+                errors="ignore" if isinstance(content, str) else None,
+            ) as file_handler:
+                file_handler.write(content)
+
+        try:
+            await self.hass.async_add_executor_job(_write_file)
+        except (
+            BaseException
+        ) as error:
+            self.log.error("Could not write data to %s - %s", file_path, error)
+            return False
+
+        return os.path.exists(file_path)
+
+    async def async_replace_file(self, file_path, search_text, replace_text):
+
+        def _replace_file():
+            with open(file_path, 'r') as file:
+                filedata = file.read()
+            filedata = filedata.replace(search_text, replace_text)
+            with open(file_path, 'w') as file:
+                file.write(filedata)
+
+        try:
+            await self.hass.async_add_executor_job(_replace_file)
+        except (
+            BaseException
+        ) as error:
+            self.log.error("Could not replace %s to %s - %s",
+                           search_text, file_path, error)
+            return False
+
+        return True
+
+    async def get_md5(self, data):
+        m = hashlib.md5()
+        m.update(data.encode())
+        return m.hexdigest()
+
+    def get_repo_version(self, repo: dict[str, Any], versionName):
+        for version in repo['version']:
+            if version['versionName'] == versionName:
+                return version
+        return None
