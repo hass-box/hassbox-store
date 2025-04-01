@@ -1,0 +1,1 @@
+"""Initialize HassBox Store utils."""
