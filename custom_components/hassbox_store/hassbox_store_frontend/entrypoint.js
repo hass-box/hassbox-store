@@ -1,0 +1,1 @@
+!function(){function e(e){var t=document.createElement("script");t.src=e,document.body.appendChild(t)}if(/.*Version\/(?:11|12)(?:\.\d+)*.*Safari\//.test(navigator.userAgent))e("");else try{new Function("import('/hassbox_store/frontend/frontend_latest/entrypoint.1d141cebe7e18571.js')")()}catch(t){e("")}}()
