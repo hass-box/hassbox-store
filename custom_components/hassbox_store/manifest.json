@@ -1,0 +1,17 @@
+{
+    "domain": "hassbox_store",
+    "name": "HassBox 应用商店",
+    "codeowners": [
+        "@HassBox"
+    ],
+    "config_flow": true,
+    "dependencies": [
+        "http",
+        "frontend",
+        "lovelace"
+    ],
+    "documentation": "https://hassbox.cn",
+    "iot_class": "cloud_polling",
+    "requirements": ["docker==7.1.0"],
+    "version": "20260210.2"
+}

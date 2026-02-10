@@ -1,0 +1,2 @@
+export const ids=["6086"];export const modules={42913:function(t,e,r){r.r(e),r.d(e,{IframeViewStrategy:function(){return a}});var n=r(44249),i=r(69507),s=r(77301);let a=(0,n.Z)([(0,s.Mo)("iframe-view-strategy")],(function(t,e){return{F:class extends e{constructor(...e){super(...e),t(this)}},d:[{kind:"method",static:!0,key:"generate",value:async function(t){return{type:"panel",title:t.title,cards:[{type:"iframe",url:t.url}]}}}]}}),i.fl)}};
+//# sourceMappingURL=6086.0c6ba40859f1f176.js.map
