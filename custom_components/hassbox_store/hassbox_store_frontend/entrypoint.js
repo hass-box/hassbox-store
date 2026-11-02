@@ -1,0 +1,1 @@
+!function(){try{new Function("import('/hassbox_store/frontend/frontend_latest/entrypoint.YIKNNTI9FYg.js')")()}catch(o){console.error("Failed to load HassBox store frontend",o)}}()
