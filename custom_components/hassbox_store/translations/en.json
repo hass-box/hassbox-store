@@ -1,0 +1,20 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "该集成已经配置过了，且只能配置一次。若要重新配置，请先删除并重启 Home Assistant 后重新配置。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HassBox 应用商店",
+        "data": {
+          "panel_name": "侧边栏入口名称"
+        }
+      }
+    },
+    "abort": {
+      "set_successful": "已成功保存。"
+    }
+  }
+}
